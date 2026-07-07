@@ -1,24 +1,24 @@
-name: tu_pension
+name: pensionate
 
 networks:
-  streamlitdocker_tu_pension:
-    name: streamlitdocker_tu_pension
+  streamlitdocker_pensionate:
+    name: streamlitdocker_pensionate
     driver: bridge
 
 services:
   streamlit:
-    image: "streamlit/tu_pension:${DATE:-latest}"
-    container_name: streamlit_tu_pension
-    hostname: streamlit_tu_pension
+    image: "streamlit/pensionate:${DATE:-latest}"
+    container_name: streamlit_pensionate
+    hostname: streamlit_pensionate
     pull_policy: never
     tty: true
     ports:
       - "8502:8502"
     build:
       context: ..
-      dockerfile: docker/streamlit_tu_pension/streamlit_tu_pension.df
+      dockerfile: docker/streamlit_pensionate/streamlit_pensionate.df
     networks:
-      - streamlitdocker_tu_pension
+      - streamlitdocker_pensionate
     volumes:
       - "../:/app"
     healthcheck:
