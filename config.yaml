@@ -1,0 +1,15 @@
+credentials:
+  usernames:
+    audrey:
+      email: audrey@gmail.com
+      name: audrey
+    william:
+      email: William@gmail.com
+      name: william
+    cristina:
+      email: ac.alcala@pensionate.co
+      name: cristina
+cookie:
+  name: nomina
+  key:  nomina_key
+  expiry_days: 1

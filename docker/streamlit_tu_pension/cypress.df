@@ -1,0 +1,10 @@
+FROM cypress/included:cypress-13.9.0-node-20.12.2-chrome-124.0.6367.155-1-ff-125.0.3-edge-124.0.2478.80-1
+
+WORKDIR /app
+
+COPY package.json /app
+RUN npm install
+
+EXPOSE 8080
+
+CMD ["npx", "cypress", "open"]

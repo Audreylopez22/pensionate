@@ -1,0 +1,28 @@
+name: tu_pension
+
+networks:
+  streamlitdocker_tu_pension:
+    name: streamlitdocker_tu_pension
+    driver: bridge
+
+services:
+  streamlit:
+    image: "streamlit/tu_pension:${DATE:-latest}"
+    container_name: streamlit_tu_pension
+    hostname: streamlit_tu_pension
+    pull_policy: never
+    tty: true
+    ports:
+      - "8502:8502"
+    build:
+      context: ..
+      dockerfile: docker/streamlit_tu_pension/streamlit_tu_pension.df
+    networks:
+      - streamlitdocker_tu_pension
+    volumes:
+      - "../:/app"
+    healthcheck:
+      test: ["CMD", "ps", "aux", "|","grep","streamlit"]
+      timeout: 10s
+      retries: 10
+

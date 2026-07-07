@@ -1,0 +1,17 @@
+# The .streamlit folder contains local configuration files used by Streamlit,
+# including sensitive information such as credentials, access tokens, etc.
+# We don't want these files to be tracked by Git or included in the remote repository
+# for security reasons and to avoid exposing sensitive information.
+.streamlit/
+
+# Ignore Python bytecode files
+__pycache__/
+*.pyc
+
+# Ignore node_modules directory
+node_modules/
+
+# Ignore rule caches
+rules/__pycache__/
+.venv
+.env
