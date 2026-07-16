@@ -91,13 +91,63 @@ if uploaded_file is not None:
         # --- OPTION 2: CREATE AND DOWNLOAD CONSOLIDATED REPORT BY MATCHING HEADERS ---
         st.header("Option 2: Create Consolidated Report by Header Content")
 
+        # Pre-process: Create a lookup for Days from ANY table that contains them
+        days_lookup_45 = {} 
+        for df_orig in extracted_tables:
+            h_str = ' '.join(df_orig.columns).lower()
+            
+            # Identify the best candidate columns for ID, Period, and Days in this table
+            id_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[34]', '[47]', 'identificación', 'identificacion'])), None)
+            per_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[37]', '[50]', 'período', 'periodo', 'ciclo'])), None)
+            days_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[45]', '[57]', '[58]', 'días cot', 'dias cot', 'días rep'])), None)
+            
+            # If we found ID and Period, look for the best Days value per row
+            if id_c and per_c:
+                # Identify potential day columns by category
+                cot_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[45]', '[58]', 'días cot', 'dias cot'])]
+                rep_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[57]', 'días rep', 'dias rep'])]
+
+                for _, r in df_orig.iterrows():
+                    val_id = str(r[id_c]).strip()
+                    val_per = str(r[per_c]).strip()
+                    clean_id = re.sub(r'\D', '', val_id)
+                    
+                    if not clean_id or not val_per:
+                        continue
+
+                    # PRIORITY LOGIC PER ROW:
+                    final_day_val = 0
+                    
+                    # 1. Try to find a non-zero value in 'Días Cotizados' columns
+                    for c in cot_cols:
+                        try:
+                            v = float(str(r[c]).replace(',', '.'))
+                            if v > 0:
+                                final_day_val = v
+                                break
+                        except: continue
+                    
+                    # 2. If still 0, try 'Días Reportados' columns
+                    if final_day_val == 0:
+                        for c in rep_cols:
+                            try:
+                                v = float(str(r[c]).replace(',', '.'))
+                                if v > 0:
+                                    final_day_val = v
+                                    break
+                            except: continue
+                    
+                    # Store the best value found for this ID and Period
+                    if final_day_val > 0:
+                        days_lookup_45[(clean_id, val_per)] = final_day_val
+
         final_tables_to_concat = []
         for df_original in extracted_tables:
             # For each table, check if it contains the core concepts (ID, Name, Period)
             headers_as_string = ' '.join(df_original.columns)
             
             # --- FILTER: EXCLUDE unwanted formats (like the [34], [40] series) ---
-            # If the table headers contain markers of the unwanted format, skip it.
+            # Now we exclude them from the CONCATENATION, but we already extracted their [45] data above.
             unwanted_markers = ['[34]', '[40]IBC', '[45] Días Cot.']
             if any(marker in headers_as_string for marker in unwanted_markers):
                 continue
@@ -237,15 +287,30 @@ if uploaded_file is not None:
 
                     # Create a summary row for each monthly segment
                     for seg_start, seg_end in month_segments:
-                        # Calculate the actual number of days in this segment
-                        calculated_days = (seg_end - seg_start).days + 1
+                        # Clean ID for lookup (only digits)
+                        raw_id = str(row[id_col_name]).strip() if id_col_name else ""
+                        clean_row_id = re.sub(r'\D', '', raw_id)
                         
+                        month_key = seg_start.strftime('%Y%m') # Matches the YYYYMM format
+                        
+                        # Get days exclusively from the document lookup
+                        final_days = 0
+                        if (clean_row_id, month_key) in days_lookup_45:
+                            raw_val = days_lookup_45[(clean_row_id, month_key)]
+                            try:
+                                final_days = float(str(raw_val).replace(',', '.'))
+                            except:
+                                final_days = 0
+                        
+                        # Format IBC for summary: replace commas with dots as requested
+                        formatted_ibc = str(final_ibc).replace(',', '.') if final_ibc is not None else None
+
                         new_row = {
-                            'DOCUMENTO': row[id_col_name] if id_col_name else None,
+                            'DOCUMENTO': raw_id,
                             'FECHA INICIAL': seg_start.strftime('%d/%m/%Y'),
                             'FECHA FINAL': seg_end.strftime('%d/%m/%Y'),
-                            'IBC': final_ibc,
-                            'DIAS': calculated_days,
+                            'IBC': formatted_ibc,
+                            'DIAS': final_days,
                             'TOTAL DIAS': row[source_cols_map['TOTAL DIAS']] if source_cols_map['TOTAL DIAS'] else None,
                             'SEMANAS': row[source_cols_map['SEMANAS']] if source_cols_map['SEMANAS'] else None
                         }
@@ -253,15 +318,15 @@ if uploaded_file is not None:
 
                 summary_df = pd.DataFrame(expanded_rows)
 
-                # --- NEW: Create "Final_Report" with Weighted Averages (IBM) ---
-                def get_ibm_report(df_summary):
+                # --- NEW: Create "Final_Report" with Weighted Averages (IBC) ---
+                def get_ibc_report(df_summary):
                     if df_summary.empty:
                         return pd.DataFrame()
                     
-                    # 1. Deduplicate: Remove exactly identical rows that might come from redundant tables
+                    # 1. Deduplicate: Remove exactly identical rows
                     df = df_summary.drop_duplicates(subset=['DOCUMENTO', 'FECHA INICIAL', 'FECHA FINAL', 'IBC']).copy()
                     
-                    # 2. Clean IBC to numeric for math
+                    # 2. Clean IBC and Days to numeric for math
                     def clean_to_num(val):
                         if pd.isna(val): return 0.0
                         s = str(val).replace('$', '').replace('.', '').replace(',', '.').replace(' ', '').strip()
@@ -269,52 +334,93 @@ if uploaded_file is not None:
                         except: return 0.0
                     
                     df['IBC_num'] = df['IBC'].apply(clean_to_num)
+                    df['DIAS_num'] = pd.to_numeric(df['DIAS'], errors='coerce').fillna(0)
+                    
                     df['FECHA_DT'] = pd.to_datetime(df['FECHA INICIAL'], format='%d/%m/%Y')
                     df['MONTH_KEY'] = df['FECHA_DT'].dt.to_period('M')
                     
                     # 3. Weighted calculation: (Days * IBC)
-                    df['WEIGHTED_VAL'] = df['DIAS'] * df['IBC_num']
+                    df['WEIGHTED_VAL'] = df['DIAS_num'] * df['IBC_num']
                     
                     # 4. Group by Month and Year
                     final_rows = []
                     for period, group in df.groupby('MONTH_KEY'):
                         total_weighted_sum = group['WEIGHTED_VAL'].sum()
-                        days_in_month = period.days_in_month
                         
-                        # IBC is the weighted average limited by the theoretical month days
-                        ibc = total_weighted_sum / days_in_month if days_in_month > 0 else 0
+                        # Rule: If multiple rows for the same month, take the maximum days found
+                        max_days = group['DIAS_num'].max()
                         
-                        # Document from the first valid row
+                        # For the weighting divisor, if max_days is 0, we avoid division by zero
+                        # Using 30 as a standard divisor for IBC weighting if requested, or the max_days
+                        # Based on previous turn: ibc = total_weighted_sum / 30
+                        ibc_weighted = total_weighted_sum / 30
+                        
                         doc = group['DOCUMENTO'].iloc[0] if 'DOCUMENTO' in group.columns else None
-                        
-                        # IMPORTANT: Cap DIAS TOTALES to the actual number of days in that month
-                        actual_sum_days = group['DIAS'].sum()
-                        capped_days = min(actual_sum_days, days_in_month)
                         
                         final_rows.append({
                             'DOCUMENTO': doc,
                             'FECHA INICIAL': period.start_time.strftime('%d/%m/%Y'),
                             'FECHA FINAL': period.end_time.strftime('%d/%m/%Y'),
-                            'IBC(Ponderado)': f"$ {ibc:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
-                            'DIAS TOTALES': capped_days
+                            'IBC(Ponderado)': f"$ {ibc_weighted:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
+                            'DIAS TOTALES': max_days
                         })
                     
                     return pd.DataFrame(final_rows)
 
-                final_report_df = get_ibm_report(summary_df)
+                final_report_df = get_ibc_report(summary_df)
+
+                # --- NEW: Create "Gaps_Report" (Missing months) ---
+                def get_gaps_report(df_final):
+                    if df_final is None or df_final.empty:
+                        return pd.DataFrame()
+                    
+                    # Get the range: from the first found date to the last one
+                    # We copy to avoid modifying the original dataframe
+                    df = df_final.copy()
+                    df['FECHA_DT'] = pd.to_datetime(df['FECHA INICIAL'], format='%d/%m/%Y')
+                    start_date = df['FECHA_DT'].min()
+                    end_date = df['FECHA_DT'].max()
+                    
+                    if pd.isna(start_date) or pd.isna(end_date):
+                        return pd.DataFrame()
+                    
+                    # Generate the full range of months
+                    full_range = pd.date_range(start=start_date.replace(day=1), end=end_date.replace(day=1), freq='MS').to_period('M')
+                    existing_months = set(df['FECHA_DT'].dt.to_period('M'))
+                    
+                    missing_rows = []
+                    for period in full_range:
+                        if period not in existing_months:
+                            missing_rows.append({
+                                'FECHA INICIAL': period.start_time.strftime('%d/%m/%Y'),
+                                'FECHA FINAL': period.end_time.strftime('%d/%m/%Y'),
+                                'OBSERVACIÓN': 'Sin datos en el PDF'
+                            })
+                    
+                    return pd.DataFrame(missing_rows)
+
+                gaps_report_df = get_gaps_report(final_report_df)
 
                 st.write("#### Summary Report Preview")
                 st.dataframe(summary_df.head())
 
                 if not final_report_df.empty:
-                    st.write("#### Final Weighted Report Preview (IBM)")
+                    st.write("#### Final Weighted Report Preview (IBC)")
                     st.dataframe(final_report_df.head())
+                
+                if not gaps_report_df.empty:
+                    st.write("#### Missing Months Report Preview")
+                    st.dataframe(gaps_report_df.head())
 
-                # --- Prepare Excel file with THREE sheets ---
-                # Drop temporary datetime columns from the main report
+                # --- Prepare Excel file with FOUR sheets ---
+                # Drop temporary datetime columns from the main reports
                 cols_to_drop = ['Periodo_dt']
                 if 'Hasta_dt' in sorted_df.columns: cols_to_drop.append('Hasta_dt')
                 sorted_df.drop(columns=cols_to_drop, inplace=True)
+                
+                # Cleanup temporary column in final report if it exists
+                if 'FECHA_DT' in final_report_df.columns:
+                    final_report_df.drop(columns=['FECHA_DT'], inplace=True)
                 
                 # Use a new function to write multiple sheets
                 output = io.BytesIO()
@@ -323,6 +429,8 @@ if uploaded_file is not None:
                     summary_df.to_excel(writer, sheet_name='Summary_Report', index=False)
                     if not final_report_df.empty:
                         final_report_df.to_excel(writer, sheet_name='Final_Report', index=False)
+                    if not gaps_report_df.empty:
+                        gaps_report_df.to_excel(writer, sheet_name='Missing_Months', index=False)
                 
                 excel_data_with_summary = output.getvalue()
                 
