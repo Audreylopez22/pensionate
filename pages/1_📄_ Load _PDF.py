@@ -57,6 +57,13 @@ def to_excel_single_sheet(df):
         df.to_excel(writer, sheet_name='Consolidated_Report', index=False)
     return output.getvalue()
 
+def is_really_empty(val):
+    """Checks if a value is effectively empty (NaN, empty string, or zero-like)."""
+    if pd.isna(val):
+        return True
+    s = str(val).strip().lower()
+    return s in ['', '-', '$ 0', '0', '0,00', '0.00', '$ 0,00', '$ 0.00']
+
 # --- Streamlit Interface ---
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
@@ -88,58 +95,57 @@ if uploaded_file is not None:
         )
         st.markdown("---")
 
-        # --- OPTION 2: CREATE AND DOWNLOAD CONSOLIDATED REPORT BY MATCHING HEADERS ---
-        st.header("Option 2: Create Consolidated Report by Header Content")
-
-        # Pre-process: Create a lookup for Days from ANY table that contains them
+        # Pre-process: Create a lookup for Days and IBC [40] from ANY table that contains them
         days_lookup_45 = {} 
+        ibc_lookup_40 = {} 
         for df_orig in extracted_tables:
-            h_str = ' '.join(df_orig.columns).lower()
-            
-            # Identify the best candidate columns for ID, Period, and Days in this table
+            # Identify columns for ID, Period, Days
             id_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[34]', '[47]', 'identificación', 'identificacion'])), None)
             per_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[37]', '[50]', 'período', 'periodo', 'ciclo'])), None)
-            days_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[45]', '[57]', '[58]', 'días cot', 'dias cot', 'días rep'])), None)
             
-            # If we found ID and Period, look for the best Days value per row
             if id_c and per_c:
-                # Identify potential day columns by category
                 cot_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[45]', '[58]', 'días cot', 'dias cot'])]
                 rep_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[57]', 'días rep', 'dias rep'])]
+                ibc_40_cols = [c for c in df_orig.columns if '[40]ibc' in c.lower()]
 
                 for _, r in df_orig.iterrows():
                     val_id = str(r[id_c]).strip()
                     val_per = str(r[per_c]).strip()
                     clean_id = re.sub(r'\D', '', val_id)
                     
-                    if not clean_id or not val_per:
+                    # Normalize period to YYYYMM for the lookup
+                    norm_per = None
+                    if len(val_per) == 6 and val_per.isdigit():
+                        norm_per = val_per
+                    else:
+                        dt_tmp = pd.to_datetime(val_per, dayfirst=True, errors='coerce')
+                        if not pd.isna(dt_tmp):
+                            norm_per = dt_tmp.strftime('%Y%m')
+
+                    if not clean_id or not norm_per:
                         continue
 
-                    # PRIORITY LOGIC PER ROW:
+                    # PRIORITY LOGIC FOR DAYS PER ROW:
                     final_day_val = 0
-                    
-                    # 1. Try to find a non-zero value in 'Días Cotizados' columns
-                    for c in cot_cols:
+                    for c in cot_cols + rep_cols:
                         try:
                             v = float(str(r[c]).replace(',', '.'))
                             if v > 0:
                                 final_day_val = v
                                 break
-                        except: continue
-                    
-                    # 2. If still 0, try 'Días Reportados' columns
-                    if final_day_val == 0:
-                        for c in rep_cols:
-                            try:
-                                v = float(str(r[c]).replace(',', '.'))
-                                if v > 0:
-                                    final_day_val = v
-                                    break
-                            except: continue
+                        except Exception:
+                            continue
                     
                     # Store the best value found for this ID and Period
                     if final_day_val > 0:
-                        days_lookup_45[(clean_id, val_per)] = final_day_val
+                        days_lookup_45[(clean_id, norm_per)] = final_day_val
+
+                    # IBC [40] LOGIC PER ROW:
+                    for c in ibc_40_cols:
+                        val_ibc40 = r[c]
+                        if not is_really_empty(val_ibc40):
+                            ibc_lookup_40[(clean_id, norm_per)] = val_ibc40
+                            break
 
         final_tables_to_concat = []
         for df_original in extracted_tables:
@@ -167,10 +173,13 @@ if uploaded_file is not None:
                 period_col = next((c for c in df.columns if any(k in c for k in ['Período', 'Ciclo', 'Periodo', 'Desde'])), None)
                 id_col = next((c for c in df.columns if 'Identificación' in c), None)
                 name_col = next((c for c in df.columns if 'Razón Social' in c or 'Nombre' in c), None)
+                # Search for the "Hasta" column (standard or [30]Ciclo Hasta)
+                hasta_col_orig = next((c for c in df.columns if any(k in c.lower() for k in ['hasta', '[30]'])), None)
                 
                 if period_col: rename_map[period_col] = 'Periodo'
                 if id_col: rename_map[id_col] = 'Identificación'
                 if name_col: rename_map[name_col] = 'Nombre o Razón Social'
+                if hasta_col_orig: rename_map[hasta_col_orig] = 'Hasta'
                 
                 df.rename(columns=rename_map, inplace=True)
                 
@@ -187,6 +196,32 @@ if uploaded_file is not None:
             
             consolidated_df = pd.concat(final_tables_to_concat, ignore_index=True, join='outer')
             
+            # --- NEW: Add [40]IBC Reportado column to the Consolidated Report ---
+            def get_ibc40_for_row(row):
+                raw_id = str(row.get('Identificación', '')).strip()
+                clean_id = re.sub(r'\D', '', raw_id)
+                val_per = str(row.get('Periodo', '')).strip()
+                
+                # Normalize period to YYYYMM for matching
+                norm_per = val_per
+                if not (len(val_per) == 6 and val_per.isdigit()):
+                    dt_tmp = pd.to_datetime(val_per, dayfirst=True, errors='coerce')
+                    if not pd.isna(dt_tmp):
+                        norm_per = dt_tmp.strftime('%Y%m')
+                
+                return ibc_lookup_40.get((clean_id, norm_per), None)
+
+            consolidated_df['[40]IBC Reportado'] = consolidated_df.apply(get_ibc40_for_row, axis=1)
+
+            # Move [40]IBC Reportado next to 'ultimo salario' if possible
+            target_col = next((c for c in consolidated_df.columns if 'ultimo salario' in c.lower() or 'último salario' in c.lower() or any(k in c.lower() for k in ['[5]', '[31]'])), None)
+            if target_col:
+                cols = list(consolidated_df.columns)
+                cols.remove('[40]IBC Reportado')
+                idx = cols.index(target_col)
+                cols.insert(idx + 1, '[40]IBC Reportado')
+                consolidated_df = consolidated_df[cols]
+
             if 'Periodo' in consolidated_df.columns:
                 st.success("Sorting report by the unified 'Periodo' column.")
                 sorted_df = consolidated_df.copy()
@@ -205,7 +240,7 @@ if uploaded_file is not None:
                     )
 
                 # Identify and parse the "Hasta" column if it exists for expansion
-                hasta_col = next((c for c in sorted_df.columns if 'hasta' in c.lower()), None)
+                hasta_col = next((c for c in sorted_df.columns if any(k in c.lower() for k in ['hasta'])), None)
                 if hasta_col:
                     sorted_df['Hasta_dt'] = pd.to_datetime(sorted_df[hasta_col].astype(str), dayfirst=True, errors='coerce')
                 else:
@@ -226,14 +261,8 @@ if uploaded_file is not None:
                     potential_asig_cols = [
                         c for c in sorted_df.columns 
                         if ('asign' in c.lower() and ('básica' in c.lower() or 'basica' in c.lower())) or
-                        ('último salario' in c.lower() or 'ultimo salario' in c.lower() or '[5]' in c.lower())
+                        ('último salario' in c.lower() or 'ultimo salario' in c.lower() or any(k in c.lower() for k in ['[5]', '[31]']))
                     ]
-
-                    def is_really_empty(val):
-                        """Checks if a value is effectively empty (NaN, empty string, or zero-like)."""
-                        if pd.isna(val): return True
-                        s = str(val).strip().lower()
-                        return s in ['', '-', '$ 0', '0', '0,00', '0.00', '$ 0,00', '$ 0.00']
 
                     # Map standard columns mapping
                     col_map = {'DIAS': 'DIAS', 'TOTAL DIAS': 'TOTAL DIAS', 'SEMANAS': 'SEMANAS'}
@@ -270,8 +299,8 @@ if uploaded_file is not None:
                                 # End of the current month, but not beyond the overall end_date
                                 curr_e = min(curr_s + pd.offsets.MonthEnd(0), end_date)
                                 month_segments.append((curr_s, curr_e))
-                                # Start of the next month
-                                curr_s = (curr_e + pd.offsets.Day(1)).replace(day=1)
+                                # Start of the next month (Robust increment to avoid infinite loops)
+                                curr_s = (curr_s + pd.offsets.MonthEnd(0) + pd.offsets.Day(1))
                                 safety_count += 1
 
                         # Find IBC for this row using previous robust logic
@@ -296,15 +325,18 @@ if uploaded_file is not None:
                             
                             month_key = seg_start.strftime('%Y%m') # Matches the YYYYMM format
                             
-                            # Get days exclusively from the document lookup
+                            # Get days from the document lookup first
                             final_days = 0
                             if (clean_row_id, month_key) in days_lookup_45:
                                 raw_val = days_lookup_45[(clean_row_id, month_key)]
                                 try:
                                     # Clean the value (handle decimal commas)
                                     final_days = float(str(raw_val).replace(',', '.'))
-                                except:
+                                except Exception:
                                     final_days = 0
+                            
+                            # FALLBACK REMOVED: We no longer calculate days based on calendar range.
+                            # If final_days is 0 (because it wasn't in lookup or was 0 in PDF), it stays 0.
                             
                             # Format IBC for summary: replace commas with dots as requested
                             formatted_ibc = str(final_ibc).replace(',', '.') if final_ibc is not None else None
@@ -315,12 +347,24 @@ if uploaded_file is not None:
                                 'FECHA FINAL': seg_end.strftime('%d/%m/%Y'),
                                 'IBC': formatted_ibc,
                                 'DIAS': final_days,
+                                '[40]IBC Reportado': ibc_lookup_40.get((clean_row_id, month_key), None),
                                 'TOTAL DIAS': row[source_cols_map['TOTAL DIAS']] if source_cols_map['TOTAL DIAS'] else None,
                                 'SEMANAS': row[source_cols_map['SEMANAS']] if source_cols_map['SEMANAS'] else None
                             }
                             expanded_rows.append(new_row)
 
                     summary_df = pd.DataFrame(expanded_rows)
+
+                    # --- Deduplicate and Sort Summary Report by Date ---
+                    if not summary_df.empty:
+                        # Create a temp datetime column for robust sorting
+                        summary_df['tmp_dt'] = pd.to_datetime(summary_df['FECHA INICIAL'], format='%d/%m/%Y', errors='coerce')
+                        # Deduplicate: Keep rows with data if possible (sort by TOTAL DIAS descending first)
+                        summary_df.sort_values(by=['tmp_dt', 'TOTAL DIAS'], ascending=[True, False], inplace=True)
+                        summary_df.drop_duplicates(subset=['DOCUMENTO', 'FECHA INICIAL', 'FECHA FINAL', 'IBC'], keep='first', inplace=True)
+                        # Final sort and cleanup
+                        summary_df.sort_values(by='tmp_dt', ascending=True, inplace=True)
+                        summary_df.drop(columns=['tmp_dt'], inplace=True)
 
                     # --- NEW: Create "Final_Report" with Weighted Averages (IBC) ---
                     def get_ibc_report(df_summary):
@@ -332,19 +376,34 @@ if uploaded_file is not None:
                         
                         # 2. Clean IBC and Days to numeric for math
                         def clean_to_num(val):
-                            if pd.isna(val): return 0.0
+                            if pd.isna(val):
+                                return 0.0
                             s = str(val).replace('$', '').replace('.', '').replace(',', '.').replace(' ', '').strip()
-                            try: return float(s)
-                            except: return 0.0
+                            try:
+                                return float(s)
+                            except Exception:
+                                return 0.0
                         
                         df['IBC_num'] = df['IBC'].apply(clean_to_num)
+                        df['IBC40_num'] = df['[40]IBC Reportado'].apply(clean_to_num)
+
+                        # NEW logic: choose the smaller IBC if both are non-zero
+                        def choose_min_ibc(row):
+                            v1 = row['IBC_num']
+                            v2 = row['IBC40_num']
+                            if v1 > 0 and v2 > 0:
+                                return min(v1, v2)
+                            return v1 if v1 > 0 else v2
+
+                        df['FINAL_IBC_FOR_WEIGHT'] = df.apply(choose_min_ibc, axis=1)
+                        
                         df['DIAS_num'] = pd.to_numeric(df['DIAS'], errors='coerce').fillna(0)
                         
                         df['FECHA_DT'] = pd.to_datetime(df['FECHA INICIAL'], format='%d/%m/%Y')
                         df['MONTH_KEY'] = df['FECHA_DT'].dt.to_period('M')
                         
-                        # 3. Weighted calculation: (Days * IBC)
-                        df['WEIGHTED_VAL'] = df['DIAS_num'] * df['IBC_num']
+                        # 3. Weighted calculation: (Days * Final IBC)
+                        df['WEIGHTED_VAL'] = df['DIAS_num'] * df['FINAL_IBC_FOR_WEIGHT']
                         
                         # 4. Group by Month and Year
                         final_rows = []
