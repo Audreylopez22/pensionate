@@ -436,7 +436,7 @@ if uploaded_file is not None:
                                 'DOCUMENTO': doc,
                                 'FECHA INICIAL': start_date.strftime('%d/%m/%Y'),
                                 'FECHA FINAL': fecha_final_str,
-                                'IBC(Ponderado)': f"$ {ibc_weighted:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
+                                'IBC(Ponderado)': int(ibc_weighted),
                                 'DIAS TOTALES': max_days
                             })
                         
