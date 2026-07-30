@@ -104,8 +104,8 @@ if uploaded_file is not None:
             per_c = next((c for c in df_orig.columns if any(k in c.lower() for k in ['[37]', '[50]', 'período', 'periodo', 'ciclo'])), None)
             
             if id_c and per_c:
+                # ONLY consider 'días cot' / 'dias cot', [45], [58]. Do not consider 'días rep' or [44].
                 cot_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[45]', '[58]', 'días cot', 'dias cot'])]
-                rep_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[57]', 'días rep', 'dias rep'])]
                 ibc_40_cols = [c for c in df_orig.columns if '[40]ibc' in c.lower()]
 
                 for _, r in df_orig.iterrows():
@@ -127,7 +127,7 @@ if uploaded_file is not None:
 
                     # PRIORITY LOGIC FOR DAYS PER ROW:
                     final_day_val = 0
-                    for c in cot_cols + rep_cols:
+                    for c in cot_cols:
                         try:
                             v = float(str(r[c]).replace(',', '.'))
                             if v > 0:
@@ -158,13 +158,13 @@ if uploaded_file is not None:
             if any(marker in headers_as_string for marker in unwanted_markers):
                 continue
 
-            # --- DETECTION: Include standard and numbered formats [1], [2], etc. ---
-            has_id_col = any(k in headers_as_string for k in ['Identificación', '[1]Identificación'])
-            has_name_col = any(k in headers_as_string for k in ['Razón Social', '[2]Nombre'])
-            has_period_col = any(k in headers_as_string for k in ['Período', 'Ciclo', 'Periodo', '[3]Desde'])
+            # --- DETECTION: Specifically require structures [1]-[9] or [12]-[20] ---
+            # To avoid duplicate data from other tables, we strictly check for these specific markers
+            is_type_1 = all(marker in headers_as_string for marker in ['[1]', '[3]', '[6]', '[9]'])
+            is_type_2 = all(marker in headers_as_string for marker in ['[12]', '[14]', '[17]', '[20]'])
             
-            # If the table contains all three concepts, process it
-            if has_id_col and has_name_col and has_period_col:
+            # If the table matches one of the required structures, process it
+            if is_type_1 or is_type_2:
                 df = df_original.copy()
                 
                 # Build a rename map to standardize the key columns
@@ -261,7 +261,7 @@ if uploaded_file is not None:
                     potential_asig_cols = [
                         c for c in sorted_df.columns 
                         if ('asign' in c.lower() and ('básica' in c.lower() or 'basica' in c.lower())) or
-                        ('último salario' in c.lower() or 'ultimo salario' in c.lower() or any(k in c.lower() for k in ['[5]', '[31]']))
+                        ('último salario' in c.lower() or 'ultimo salario' in c.lower() or any(k in c.lower() for k in ['[5]', '[31]', '[16]']))
                     ]
 
                     # Map standard columns mapping
@@ -271,9 +271,9 @@ if uploaded_file is not None:
                         sc = next((c for c in sorted_df.columns if keyword.lower() in c.lower()), None)
                         if not sc:
                             if target_col == 'TOTAL DIAS':
-                                sc = next((c for c in sorted_df.columns if '[9]' in c or 'total' in c.lower()), None)
+                                sc = next((c for c in sorted_df.columns if '[9]' in c or '[20]' in c or 'total' in c.lower()), None)
                             elif target_col == 'SEMANAS':
-                                sc = next((c for c in sorted_df.columns if '[6]' in c), None)
+                                sc = next((c for c in sorted_df.columns if '[6]' in c or '[17]' in c), None)
                         source_cols_map[target_col] = sc
 
                     # Iterate through each row to expand if the range spans multiple months
@@ -317,6 +317,28 @@ if uploaded_file is not None:
                         if is_really_empty(final_ibc) and potential_ibc_cols:
                             final_ibc = row[potential_ibc_cols[0]]
 
+                        # Extract "semanas" value safely
+                        # Since we might have both [6] and [17] columns after concatenation, 
+                        # we must check which one actually has a value for this specific row.
+                        raw_semanas = None
+                        if source_cols_map['SEMANAS']:
+                            raw_semanas = row[source_cols_map['SEMANAS']]
+                            
+                        # If the primary 'SEMANAS' column is empty, check alternative columns explicitly
+                        if is_really_empty(raw_semanas):
+                            alt_sem_cols = [c for c in sorted_df.columns if '[6]' in c or '[17]' in c or 'semanas' in c.lower()]
+                            for asc in alt_sem_cols:
+                                if not is_really_empty(row[asc]):
+                                    raw_semanas = row[asc]
+                                    break
+                                    
+                        try:
+                            s_val = float(str(raw_semanas).replace(',', '.'))
+                        except Exception:
+                            s_val = 0.0
+                            
+                        num_months = len(month_segments)
+
                         # Create a summary row for each monthly segment
                         for seg_start, seg_end in month_segments:
                             # Clean ID for lookup (only digits)
@@ -325,15 +347,28 @@ if uploaded_file is not None:
                             
                             month_key = seg_start.strftime('%Y%m') # Matches the YYYYMM format
                             
-                            # Get days from the document lookup first
-                            final_days = 0
+                            # Get days from the document lookup first as fallback
+                            fallback_days = 0
                             if (clean_row_id, month_key) in days_lookup_45:
                                 raw_val = days_lookup_45[(clean_row_id, month_key)]
                                 try:
                                     # Clean the value (handle decimal commas)
-                                    final_days = float(str(raw_val).replace(',', '.'))
+                                    fallback_days = float(str(raw_val).replace(',', '.'))
                                 except Exception:
-                                    final_days = 0
+                                    fallback_days = 0
+                                    
+                            # NEW LOGIC for days based on Semanas
+                            final_days = 0
+                            if s_val > 0:
+                                if num_months == 1:
+                                    final_days = round(s_val * 7)
+                                elif num_months > 1:
+                                    if s_val <= 8.58:
+                                        final_days = fallback_days
+                                    else:
+                                        final_days = round((s_val * 7) / num_months)
+                            else:
+                                final_days = fallback_days
                             
                             # FALLBACK REMOVED: We no longer calculate days based on calendar range.
                             # If final_days is 0 (because it wasn't in lookup or was 0 in PDF), it stays 0.
@@ -348,8 +383,8 @@ if uploaded_file is not None:
                                 'IBC': formatted_ibc,
                                 'DIAS': final_days,
                                 '[40]IBC Reportado': ibc_lookup_40.get((clean_row_id, month_key), None),
-                                'TOTAL DIAS': row[source_cols_map['TOTAL DIAS']] if source_cols_map['TOTAL DIAS'] else None,
-                                'SEMANAS': row[source_cols_map['SEMANAS']] if source_cols_map['SEMANAS'] else None
+                                'TOTAL DIAS': row[source_cols_map['TOTAL DIAS']] if source_cols_map['TOTAL DIAS'] and not is_really_empty(row[source_cols_map['TOTAL DIAS']]) else next((row[c] for c in sorted_df.columns if ('[9]' in c or '[20]' in c or 'total' in c.lower()) and not is_really_empty(row[c])), None),
+                                'SEMANAS': raw_semanas
                             }
                             expanded_rows.append(new_row)
 
