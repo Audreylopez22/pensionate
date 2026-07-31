@@ -106,7 +106,7 @@ if uploaded_file is not None:
             if id_c and per_c:
                 # ONLY consider 'días cot' / 'dias cot', [45], [58]. Do not consider 'días rep' or [44].
                 cot_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[45]', '[58]', 'días cot', 'dias cot'])]
-                ibc_40_cols = [c for c in df_orig.columns if '[40]ibc' in c.lower()]
+                ibc_40_cols = [c for c in df_orig.columns if any(k in c.lower() for k in ['[40]ibc', '[53]', 'asignación básica mensual'])]
 
                 for _, r in df_orig.iterrows():
                     val_id = str(r[id_c]).strip()
@@ -176,10 +176,14 @@ if uploaded_file is not None:
                 # Search for the "Hasta" column (standard or [30]Ciclo Hasta)
                 hasta_col_orig = next((c for c in df.columns if any(k in c.lower() for k in ['hasta', '[30]'])), None)
                 
-                if period_col: rename_map[period_col] = 'Periodo'
-                if id_col: rename_map[id_col] = 'Identificación'
-                if name_col: rename_map[name_col] = 'Nombre o Razón Social'
-                if hasta_col_orig: rename_map[hasta_col_orig] = 'Hasta'
+                if period_col:
+                    rename_map[period_col] = 'Periodo'
+                if id_col:
+                    rename_map[id_col] = 'Identificación'
+                if name_col:
+                    rename_map[name_col] = 'Nombre o Razón Social'
+                if hasta_col_orig:
+                    rename_map[hasta_col_orig] = 'Hasta'
                 
                 df.rename(columns=rename_map, inplace=True)
                 
@@ -257,7 +261,7 @@ if uploaded_file is not None:
                     
                     # Identify columns for the summary beforehand
                     id_col_name = next((c for c in sorted_df.columns if 'Identificación' in c), None)
-                    potential_ibc_cols = [c for c in sorted_df.columns if 'ibc' in c.lower()]
+                    potential_ibc_cols = [c for c in sorted_df.columns if 'ibc' in c.lower() and '[40]' not in c]
                     potential_asig_cols = [
                         c for c in sorted_df.columns 
                         if ('asign' in c.lower() and ('básica' in c.lower() or 'basica' in c.lower())) or
@@ -303,14 +307,14 @@ if uploaded_file is not None:
                                 curr_s = (curr_s + pd.offsets.MonthEnd(0) + pd.offsets.Day(1))
                                 safety_count += 1
 
-                        # Find IBC for this row using previous robust logic
+                        # Find IBC for this row from the summary table ([5]Último Salario / Asignación)
                         final_ibc = None
-                        for col in potential_ibc_cols:
+                        for col in potential_asig_cols:
                             if not is_really_empty(row[col]):
                                 final_ibc = row[col]
                                 break
                         if is_really_empty(final_ibc):
-                            for col in potential_asig_cols:
+                            for col in potential_ibc_cols:
                                 if not is_really_empty(row[col]):
                                     final_ibc = row[col]
                                     break
@@ -357,16 +361,25 @@ if uploaded_file is not None:
                                 except Exception:
                                     fallback_days = 0
                                     
-                            # NEW LOGIC for days based on Semanas
+                            # Restored original logic with fallback_days priority when num_months > 1
                             final_days = 0
+                            is_calculated = False
                             if s_val > 0:
                                 if num_months == 1:
-                                    final_days = round(s_val * 7)
+                                    if fallback_days > 0:
+                                        final_days = fallback_days
+                                    else:
+                                        final_days = round(s_val * 7)
+                                        is_calculated = True
                                 elif num_months > 1:
                                     if s_val <= 8.58:
                                         final_days = fallback_days
                                     else:
-                                        final_days = round((s_val * 7) / num_months)
+                                        if fallback_days > 0:
+                                            final_days = fallback_days
+                                        else:
+                                            final_days = round((s_val * 7) / num_months)
+                                            is_calculated = True
                             else:
                                 final_days = fallback_days
                             
@@ -384,7 +397,8 @@ if uploaded_file is not None:
                                 'DIAS': final_days,
                                 '[40]IBC Reportado': ibc_lookup_40.get((clean_row_id, month_key), None),
                                 'TOTAL DIAS': row[source_cols_map['TOTAL DIAS']] if source_cols_map['TOTAL DIAS'] and not is_really_empty(row[source_cols_map['TOTAL DIAS']]) else next((row[c] for c in sorted_df.columns if ('[9]' in c or '[20]' in c or 'total' in c.lower()) and not is_really_empty(row[c])), None),
-                                'SEMANAS': raw_semanas
+                                'SEMANAS': raw_semanas,
+                                'DIAS_CALCULADO': is_calculated
                             }
                             expanded_rows.append(new_row)
 
@@ -411,9 +425,30 @@ if uploaded_file is not None:
                         
                         # 2. Clean IBC and Days to numeric for math
                         def clean_to_num(val):
-                            if pd.isna(val):
+                            if pd.isna(val) or val is None:
                                 return 0.0
-                            s = str(val).replace('$', '').replace('.', '').replace(',', '.').replace(' ', '').strip()
+                            s = str(val).replace('$', '').replace(' ', '').strip()
+                            if not s or s == '-':
+                                return 0.0
+                            if '.' in s and ',' in s:
+                                if s.find('.') < s.find(','):
+                                    s = s.replace('.', '').replace(',', '.')
+                                else:
+                                    s = s.replace(',', '')
+                            elif ',' in s:
+                                parts = s.split(',')
+                                if len(parts) == 2 and len(parts[1]) in [1, 2]:
+                                    s = parts[0].replace('.', '') + '.' + parts[1]
+                                else:
+                                    s = s.replace(',', '')
+                            elif '.' in s:
+                                parts = s.split('.')
+                                if len(parts[-1]) == 3 and len(parts) > 1:
+                                    s = s.replace('.', '')
+                                elif len(parts) == 2 and len(parts[1]) in [1, 2]:
+                                    pass
+                                else:
+                                    s = s.replace('.', '')
                             try:
                                 return float(s)
                             except Exception:
@@ -422,13 +457,17 @@ if uploaded_file is not None:
                         df['IBC_num'] = df['IBC'].apply(clean_to_num)
                         df['IBC40_num'] = df['[40]IBC Reportado'].apply(clean_to_num)
 
-                        # NEW logic: choose the smaller IBC if both are non-zero
+                        # Choose the minimum valid IBC between the summary salary (IBC) and the detail cycle ([40]IBC Reportado)
                         def choose_min_ibc(row):
                             v1 = row['IBC_num']
                             v2 = row['IBC40_num']
                             if v1 > 0 and v2 > 0:
                                 return min(v1, v2)
-                            return v1 if v1 > 0 else v2
+                            elif v1 > 0:
+                                return v1
+                            elif v2 > 0:
+                                return v2
+                            return 0.0
 
                         df['FINAL_IBC_FOR_WEIGHT'] = df.apply(choose_min_ibc, axis=1)
                         
@@ -450,7 +489,14 @@ if uploaded_file is not None:
                             if max_days <= 0:
                                 continue
 
-                            total_weighted_sum = group['WEIGHTED_VAL'].sum()
+                            # Calculate weighted IBC across employers
+                            total_weighted = 0.0
+                            for doc_id, doc_group in group.groupby('DOCUMENTO'):
+                                d_days = doc_group['DIAS_num'].max()
+                                d_ibc = doc_group['FINAL_IBC_FOR_WEIGHT'].max()
+                                total_weighted += (d_days * d_ibc)
+                            
+                            ibc_weighted = total_weighted / max_days if max_days > 0 else 0
                             
                             # Logic for final date based on number of days
                             start_date = period.start_time
@@ -462,17 +508,18 @@ if uploaded_file is not None:
                                 # 30 or more days -> defaults to the full month end
                                 fecha_final_str = period.end_time.strftime('%d/%m/%Y')
 
-                            # Calculate weighted IBC
-                            ibc_weighted = total_weighted_sum / max_days
-                            
                             doc = group['DOCUMENTO'].iloc[0] if 'DOCUMENTO' in group.columns else None
                             
+                            max_day_rows = group[group['DIAS_num'] == max_days]
+                            is_calc = max_day_rows['DIAS_CALCULADO'].any() if 'DIAS_CALCULADO' in max_day_rows.columns else False
+
                             final_rows.append({
                                 'DOCUMENTO': doc,
                                 'FECHA INICIAL': start_date.strftime('%d/%m/%Y'),
                                 'FECHA FINAL': fecha_final_str,
-                                'IBC(Ponderado)': int(ibc_weighted),
-                                'DIAS TOTALES': max_days
+                                'IBC(Ponderado)': int(round(ibc_weighted)),
+                                'DIAS TOTALES': max_days,
+                                'DIAS_CALCULADO': is_calc
                             })
                         
                         return pd.DataFrame(final_rows)
@@ -556,12 +603,26 @@ if uploaded_file is not None:
 
                     gaps_report_df = get_gaps_report(final_report_df)
 
+                    st.info("🟦 **Nota de color:** Las celdas de días resaltadas en **azul** corresponden a días calculados por la regla de semanas/promedio (cuando no venían explícitamente en las tablas del PDF).")
+
+                    def style_df_preview(df, col_name):
+                        if 'DIAS_CALCULADO' not in df.columns:
+                            return df
+                        cols_display = [c for c in df.columns if c != 'DIAS_CALCULADO']
+                        def highlight_calc(row):
+                            styles = [''] * len(cols_display)
+                            if row.get('DIAS_CALCULADO', False) and col_name in cols_display:
+                                idx = cols_display.index(col_name)
+                                styles[idx] = 'background-color: #BDD7EE; color: #000000; font-weight: bold;'
+                            return styles
+                        return df[cols_display].style.apply(highlight_calc, axis=1)
+
                     st.write("#### Summary Report Preview")
-                    st.dataframe(summary_df.head())
+                    st.dataframe(style_df_preview(summary_df.head(15), 'DIAS'))
 
                     if not final_report_df.empty:
                         st.write("#### Final Weighted Report Preview (IBC)")
-                        st.dataframe(final_report_df.head())
+                        st.dataframe(style_df_preview(final_report_df.head(15), 'DIAS TOTALES'))
                     
                     if not gaps_report_df.empty:
                         st.write("#### Missing Months Report Preview")
@@ -570,20 +631,49 @@ if uploaded_file is not None:
                     # --- Prepare Excel file with FOUR sheets ---
                     # Drop temporary datetime columns from the main reports
                     cols_to_drop = ['Periodo_dt']
-                    if 'Hasta_dt' in sorted_df.columns: cols_to_drop.append('Hasta_dt')
+                    if 'Hasta_dt' in sorted_df.columns:
+                        cols_to_drop.append('Hasta_dt')
                     sorted_df.drop(columns=cols_to_drop, inplace=True)
                     
                     # Cleanup temporary column in final report if it exists
                     if 'FECHA_DT' in final_report_df.columns:
                         final_report_df.drop(columns=['FECHA_DT'], inplace=True)
                     
-                    # Use a new function to write multiple sheets
+                    # Use a new function to write multiple sheets with OpenPyXL styling
+                    from openpyxl.styles import PatternFill
+                    blue_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         sorted_df.to_excel(writer, sheet_name='Consolidated_Report', index=False)
-                        summary_df.to_excel(writer, sheet_name='Summary_Report', index=False)
+                        
+                        # Summary_Report
+                        if 'DIAS_CALCULADO' in summary_df.columns:
+                            summary_export = summary_df.drop(columns=['DIAS_CALCULADO'])
+                            summary_export.to_excel(writer, sheet_name='Summary_Report', index=False)
+                            ws_summary = writer.sheets['Summary_Report']
+                            if 'DIAS' in summary_export.columns:
+                                d_idx = summary_export.columns.get_loc('DIAS') + 1
+                                for r_i, is_c in enumerate(summary_df['DIAS_CALCULADO'], start=2):
+                                    if is_c:
+                                        ws_summary.cell(row=r_i, column=d_idx).fill = blue_fill
+                        else:
+                            summary_df.to_excel(writer, sheet_name='Summary_Report', index=False)
+
+                        # Final_Report
                         if not final_report_df.empty:
-                            final_report_df.to_excel(writer, sheet_name='Final_Report', index=False)
+                            if 'DIAS_CALCULADO' in final_report_df.columns:
+                                final_export = final_report_df.drop(columns=['DIAS_CALCULADO'])
+                                final_export.to_excel(writer, sheet_name='Final_Report', index=False)
+                                ws_final = writer.sheets['Final_Report']
+                                if 'DIAS TOTALES' in final_export.columns:
+                                    dt_idx = final_export.columns.get_loc('DIAS TOTALES') + 1
+                                    for r_i, is_c in enumerate(final_report_df['DIAS_CALCULADO'], start=2):
+                                        if is_c:
+                                            ws_final.cell(row=r_i, column=dt_idx).fill = blue_fill
+                            else:
+                                final_report_df.to_excel(writer, sheet_name='Final_Report', index=False)
+
                         if not gaps_report_df.empty:
                             gaps_report_df.to_excel(writer, sheet_name='Missing_Months', index=False)
                     
