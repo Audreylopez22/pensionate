@@ -391,8 +391,8 @@ if uploaded_file is not None:
 
                             new_row = {
                                 'DOCUMENTO': raw_id,
-                                'FECHA INICIAL': seg_start.strftime('%d/%m/%Y'),
-                                'FECHA FINAL': seg_end.strftime('%d/%m/%Y'),
+                                'FECHA INICIAL': seg_start.date() if hasattr(seg_start, 'date') else seg_start,
+                                'FECHA FINAL': seg_end.date() if hasattr(seg_end, 'date') else seg_end,
                                 'IBC': formatted_ibc,
                                 'DIAS': final_days,
                                 '[40]IBC Reportado': ibc_lookup_40.get((clean_row_id, month_key), None),
@@ -502,11 +502,10 @@ if uploaded_file is not None:
                             start_date = period.start_time
                             if max_days < 30:
                                 # End date corresponds to the number of days reported (e.g., 15 days -> ends on day 15)
-                                end_date = start_date + pd.offsets.Day(int(max_days) - 1)
-                                fecha_final_str = end_date.strftime('%d/%m/%Y')
+                                fecha_final_obj = start_date + pd.offsets.Day(int(max_days) - 1)
                             else:
                                 # 30 or more days -> defaults to the full month end
-                                fecha_final_str = period.end_time.strftime('%d/%m/%Y')
+                                fecha_final_obj = period.end_time
 
                             doc = group['DOCUMENTO'].iloc[0] if 'DOCUMENTO' in group.columns else None
                             
@@ -515,8 +514,8 @@ if uploaded_file is not None:
 
                             final_rows.append({
                                 'DOCUMENTO': doc,
-                                'FECHA INICIAL': start_date.strftime('%d/%m/%Y'),
-                                'FECHA FINAL': fecha_final_str,
+                                'FECHA INICIAL': start_date.date() if hasattr(start_date, 'date') else start_date,
+                                'FECHA FINAL': fecha_final_obj.date() if hasattr(fecha_final_obj, 'date') else fecha_final_obj,
                                 'IBC(Ponderado)': int(round(ibc_weighted)),
                                 'DIAS TOTALES': max_days,
                                 'DIAS_CALCULADO': is_calc
@@ -593,8 +592,8 @@ if uploaded_file is not None:
                         for r in merged_ranges:
                             weeks = r['theoretical_days'] / 7
                             gap_rows.append({
-                                'FECHA INICIAL': r['start'].strftime('%d/%m/%Y'),
-                                'FECHA FINAL': r['end'].strftime('%d/%m/%Y'),
+                                'FECHA INICIAL': r['start'].date() if hasattr(r['start'], 'date') else r['start'],
+                                'FECHA FINAL': r['end'].date() if hasattr(r['end'], 'date') else r['end'],
                                 'DÍAS FALTANTES (Base 30)': r['theoretical_days'],
                                 'SEMANAS': round(weeks, 2)
                             })
@@ -630,6 +629,12 @@ if uploaded_file is not None:
 
                     # --- Prepare Excel file with FOUR sheets ---
                     # Drop temporary datetime columns from the main reports
+                    # But first, replace the string 'Periodo' and 'Hasta' with the date objects (no time)
+                    if 'Periodo_dt' in sorted_df.columns:
+                        sorted_df['Periodo'] = sorted_df['Periodo_dt'].dt.date
+                    if 'Hasta_dt' in sorted_df.columns:
+                        sorted_df['Hasta'] = sorted_df['Hasta_dt'].dt.date
+
                     cols_to_drop = ['Periodo_dt']
                     if 'Hasta_dt' in sorted_df.columns:
                         cols_to_drop.append('Hasta_dt')
@@ -645,9 +650,10 @@ if uploaded_file is not None:
 
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        # 1. Consolidated_Report
                         sorted_df.to_excel(writer, sheet_name='Consolidated_Report', index=False)
                         
-                        # Summary_Report
+                        # 2. Summary_Report
                         if 'DIAS_CALCULADO' in summary_df.columns:
                             summary_export = summary_df.drop(columns=['DIAS_CALCULADO'])
                             summary_export.to_excel(writer, sheet_name='Summary_Report', index=False)
@@ -660,7 +666,7 @@ if uploaded_file is not None:
                         else:
                             summary_df.to_excel(writer, sheet_name='Summary_Report', index=False)
 
-                        # Final_Report
+                        # 3. Final_Report
                         if not final_report_df.empty:
                             if 'DIAS_CALCULADO' in final_report_df.columns:
                                 final_export = final_report_df.drop(columns=['DIAS_CALCULADO'])
@@ -674,9 +680,26 @@ if uploaded_file is not None:
                             else:
                                 final_report_df.to_excel(writer, sheet_name='Final_Report', index=False)
 
+                        # 4. Gaps_Report
                         if not gaps_report_df.empty:
                             gaps_report_df.to_excel(writer, sheet_name='Missing_Months', index=False)
-                    
+
+                        # --- NEW: Force DD/MM/YYYY format for all date columns in all sheets ---
+                        date_format = 'DD/MM/YYYY'
+                        for sheet_name in writer.sheets:
+                            ws = writer.sheets[sheet_name]
+                            # Get the headers to identify date columns
+                            headers = [cell.value for cell in ws[1]]
+                            date_col_indices = [
+                                i + 1 for i, h in enumerate(headers) 
+                                if h and any(k in h.upper() for k in ['FECHA', 'PERIODO', 'HASTA'])
+                            ]
+                            
+                            for col_idx in date_col_indices:
+                                # Apply format to all cells in the column except the header
+                                for row in range(2, ws.max_row + 1):
+                                    ws.cell(row=row, column=col_idx).number_format = date_format
+
                     excel_data_with_summary = output.getvalue()
                     
                     st.download_button(
