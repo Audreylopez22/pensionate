@@ -482,10 +482,16 @@ if uploaded_file is not None:
                         # 4. Group by Month and Year
                         final_rows = []
                         for period, group in df.groupby('MONTH_KEY'):
-                            # Rule: If multiple rows for the same month, take the maximum days found
-                            max_days = group['DIAS_num'].max()
+                            # Rule: Identify max days per employer
+                            employer_days = group.groupby('DOCUMENTO')['DIAS_num'].max()
                             
-                            # NEW FILTER: Skip months with 0 days reported
+                            # NEW LOGIC: if none reach 30, sum them (max 30). Otherwise take the max.
+                            if all(d < 30 for d in employer_days):
+                                max_days = min(employer_days.sum(), 30)
+                            else:
+                                max_days = employer_days.max()
+                            
+                            # Skip months with 0 days reported
                             if max_days <= 0:
                                 continue
 
@@ -509,8 +515,8 @@ if uploaded_file is not None:
 
                             doc = group['DOCUMENTO'].iloc[0] if 'DOCUMENTO' in group.columns else None
                             
-                            max_day_rows = group[group['DIAS_num'] == max_days]
-                            is_calc = max_day_rows['DIAS_CALCULADO'].any() if 'DIAS_CALCULADO' in max_day_rows.columns else False
+                            # For calculated flag, check if any involved row was calculated
+                            is_calc = group['DIAS_CALCULADO'].any() if 'DIAS_CALCULADO' in group.columns else False
 
                             final_rows.append({
                                 'DOCUMENTO': doc,
