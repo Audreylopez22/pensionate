@@ -147,6 +147,28 @@ if uploaded_file is not None:
                             ibc_lookup_40[(clean_id, norm_per)] = val_ibc40
                             break
 
+        # --- Lookup: "DETALLE DE PAGOS EFECTUADOS ANTERIORES A 1995" ([27]-[33]) ---
+        # Key (ID, [29] Ciclo Desde, [30] Ciclo Hasta) -> [32] Días Rep., to match the [1]-[9] summary rows.
+        pre95_days_lookup = {}
+        for df_orig in extracted_tables:
+            id_c27 = next((c for c in df_orig.columns if '[27]' in c), None)
+            desde_c29 = next((c for c in df_orig.columns if '[29]' in c), None)
+            hasta_c30 = next((c for c in df_orig.columns if '[30]' in c), None)
+            dias_c32 = next((c for c in df_orig.columns if '[32]' in c), None)
+            if not (id_c27 and desde_c29 and hasta_c30 and dias_c32):
+                continue
+            for _, r in df_orig.iterrows():
+                clean_id = re.sub(r'\D', '', str(r[id_c27]))
+                d_ini = pd.to_datetime(str(r[desde_c29]).strip(), format='%d/%m/%Y', errors='coerce')
+                d_fin = pd.to_datetime(str(r[hasta_c30]).strip(), format='%d/%m/%Y', errors='coerce')
+                try:
+                    dias_rep = float(str(r[dias_c32]).replace(',', '.'))
+                except ValueError:
+                    continue
+                if clean_id and not pd.isna(d_ini) and not pd.isna(d_fin) and dias_rep > 0:
+                    key = (clean_id, d_ini, d_fin)
+                    pre95_days_lookup[key] = pre95_days_lookup.get(key, 0) + dias_rep
+
         final_tables_to_concat = []
         for df_original in extracted_tables:
             # For each table, check if it contains the core concepts (ID, Name, Period)
@@ -343,6 +365,12 @@ if uploaded_file is not None:
                             
                         num_months = len(month_segments)
 
+                        # Match with "DETALLE DE PAGOS ANTERIORES A 1995": same ID, Desde and Hasta
+                        pre95_days = None
+                        if id_col_name and not pd.isna(end_date):
+                            pre95_key = (re.sub(r'\D', '', str(row[id_col_name])), start_date, end_date)
+                            pre95_days = pre95_days_lookup.get(pre95_key)
+
                         # Create a summary row for each monthly segment
                         for seg_start, seg_end in month_segments:
                             # Clean ID for lookup (only digits)
@@ -382,7 +410,12 @@ if uploaded_file is not None:
                                             is_calculated = True
                             else:
                                 final_days = fallback_days
-                            
+
+                            # Pre-1995 rows: [32] Días Rep. divided by the number of months in the range
+                            if pre95_days:
+                                final_days = round(pre95_days / num_months)
+                                is_calculated = True
+
                             # FALLBACK REMOVED: We no longer calculate days based on calendar range.
                             # If final_days is 0 (because it wasn't in lookup or was 0 in PDF), it stays 0.
                             
